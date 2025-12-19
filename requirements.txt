@@ -1,0 +1,6 @@
+streamlit
+replicate
+librosa
+matplotlib
+numpy
+pydub

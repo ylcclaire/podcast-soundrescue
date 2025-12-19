@@ -1,0 +1,7 @@
+[theme]
+base = "dark"
+primaryColor = "#818CF8"  # Slate Blue/Indigo
+backgroundColor = "#0F172A" # Dark Slate
+secondaryBackgroundColor = "#1E293B" # Lighter Slate
+textColor = "#E2E8F0" # Light Gray
+font = "sans serif"
