@@ -1,409 +1,311 @@
-import streamlit as st
-import streamlit.components.v1 as components
-import base64
+from nicegui import ui, app as nicegui_app
+from pydub import AudioSegment
+from pydub.effects import normalize, compress_dynamic_range
+import matplotlib.pyplot as plt
+import numpy as np
+import io
+import os
+from pathlib import Path
 
-# Page configuration
-st.set_page_config(
-    page_title="Podcast Rescue",
-    page_icon="🎙️",
-    layout="wide"
-)
+# State management
+state = {
+    'projects': {},  # {project_name: {'file_path': str, 'rescued': bool}}
+    'current_page': 'sound_rescue',
+    'current_audio': None,
+    'upload_folder': 'uploads',
+    'output_folder': 'rescued'
+}
 
-# Initialize session state for file history
-if 'file_history' not in st.session_state:
-    st.session_state.file_history = []
+# Ensure folders exist
+Path(state['upload_folder']).mkdir(exist_ok=True)
+Path(state['output_folder']).mkdir(exist_ok=True)
 
-if 'active_file_index' not in st.session_state:
-    st.session_state.active_file_index = None
 
-# Helper function: Create crossfader HTML component
-def get_audio_html(original_data, enhanced_data):
-    """Generate HTML/JS for seamless audio crossfader"""
-    # Encode both audio files to base64
-    original_b64 = base64.b64encode(original_data).decode()
-    enhanced_b64 = base64.b64encode(enhanced_data).decode()
+def generate_waveform(audio_path):
+    """Generate waveform visualization using matplotlib"""
+    audio = AudioSegment.from_file(audio_path)
+    samples = np.array(audio.get_array_of_samples())
     
-    html_code = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body {{
-                font-family: sans-serif;
-                background-color: #0F172A;
-                color: #E2E8F0;
-                padding: 20px;
-            }}
-            .player-container {{
-                max-width: 800px;
-                margin: 0 auto;
-                padding: 30px;
-                background: #1E293B;
-                border-radius: 12px;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-            }}
-            .controls {{
-                text-align: center;
-                margin-bottom: 30px;
-            }}
-            .play-button {{
-                background: #818CF8;
-                color: white;
-                border: none;
-                padding: 15px 40px;
-                font-size: 18px;
-                border-radius: 8px;
-                cursor: pointer;
-                transition: background 0.3s;
-            }}
-            .play-button:hover {{
-                background: #6366F1;
-            }}
-            .toggle-container {{
-                margin-top: 30px;
-                text-align: center;
-            }}
-            .toggle-button {{
-                background: #1E293B;
-                color: white;
-                border: 2px solid #818CF8;
-                padding: 20px 60px;
-                font-size: 20px;
-                border-radius: 12px;
-                cursor: pointer;
-                transition: all 0.3s;
-                font-weight: bold;
-            }}
-            .toggle-button:hover {{
-                background: #334155;
-                transform: scale(1.05);
-            }}
-            .toggle-button.original {{
-                border-color: #EF4444;
-                box-shadow: 0 0 20px rgba(239, 68, 68, 0.5);
-            }}
-            .toggle-button.enhanced {{
-                border-color: #10B981;
-                box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
-            }}
-            .time-display {{
-                text-align: center;
-                margin-top: 20px;
-                font-size: 16px;
-                color: #94A3B8;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="player-container">
-            <div class="controls">
-                <button id="playBtn" class="play-button">▶️ Play</button>
-            </div>
+    # Downsample for visualization
+    step = max(1, len(samples) // 2000)
+    samples = samples[::step]
+    
+    fig, ax = plt.subplots(figsize=(12, 3), facecolor='none')
+    ax.plot(samples, color='#ec4899', linewidth=0.5)
+    ax.set_facecolor('none')
+    ax.set_xlim(0, len(samples))
+    ax.set_ylim(samples.min(), samples.max())
+    ax.axis('off')
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', transparent=True, bbox_inches='tight', dpi=100)
+    plt.close(fig)
+    buf.seek(0)
+    
+    return buf
+
+
+def rescue_audio(input_path, output_path, low_switch=0.5, high_switch=0.5, enhancement='normal'):
+    """Process audio with rescue settings"""
+    audio = AudioSegment.from_file(input_path)
+    
+    # Apply normalization
+    audio = normalize(audio)
+    
+    # Apply compression based on settings
+    threshold = -20 + (low_switch * 10)
+    ratio = 2 + (high_switch * 2)
+    audio = compress_dynamic_range(audio, threshold=threshold, ratio=ratio)
+    
+    # Enhancement modes
+    if enhancement == 'enhanced':
+        audio = audio + 2  # Slight boost
+    
+    audio.export(output_path, format='mp3')
+    return output_path
+
+
+# UI Components
+def create_navbar():
+    """Create top navigation bar"""
+    with ui.row().classes('w-full h-16 bg-white/60 backdrop-blur-md shadow-sm fixed top-0 z-50 items-center px-6 justify-between'):
+        with ui.row().classes('gap-6 items-center'):
+            ui.label('🎙️ Podcast Rescue').classes('text-xl font-bold text-gray-800')
             
-            <div class="toggle-container">
-                <button id="toggleBtn" class="toggle-button original">🔴 Original</button>
-            </div>
+            nav_items = [
+                ('Sound Rescue', 'sound_rescue'),
+                ('About', 'about'),
+                ('Dynamic Balance', 'dynamic_balance'),
+                ('Create Video', 'create_video')
+            ]
             
-            <div class="time-display" id="timeDisplay">0:00 / 0:00</div>
-        </div>
+            for label, page in nav_items:
+                btn = ui.button(label, on_click=lambda p=page: switch_page(p))
+                btn.props('flat')
+                if state['current_page'] == page:
+                    btn.classes('text-pink-500 font-semibold')
+                else:
+                    btn.classes('text-gray-600')
+
+
+def create_sidebar():
+    """Create left sidebar with upload and project list"""
+    with ui.left_drawer(value=True).classes('bg-white/50 backdrop-blur-lg') as drawer:
+        drawer.style('width: 280px')
         
-        <!-- Hidden audio elements -->
-        <audio id="originalAudio" preload="auto">
-            <source src="data:audio/wav;base64,{original_b64}" type="audio/wav">
-        </audio>
-        <audio id="enhancedAudio" preload="auto">
-            <source src="data:audio/wav;base64,{enhanced_b64}" type="audio/wav">
-        </audio>
-        
-        <script>
-            const playBtn = document.getElementById('playBtn');
-            const toggleBtn = document.getElementById('toggleBtn');
-            const originalAudio = document.getElementById('originalAudio');
-            const enhancedAudio = document.getElementById('enhancedAudio');
-            const timeDisplay = document.getElementById('timeDisplay');
+        with ui.column().classes('p-4 gap-4 w-full'):
+            ui.label('Upload').classes('text-lg font-semibold text-gray-700')
             
-            let isPlaying = false;
-            let isOriginal = true;
+            upload = ui.upload(
+                on_upload=handle_upload,
+                auto_upload=True,
+                multiple=False
+            ).classes('w-full')
+            upload.props('accept="audio/*"')
             
-            // Initialize volumes - start with Original
-            originalAudio.volume = 1.0;
-            enhancedAudio.volume = 0.0;
+            ui.separator().classes('my-4')
             
-            // Play/Pause button
-            playBtn.addEventListener('click', function() {{
-                if (!isPlaying) {{
-                    // Sync both audios and play
-                    originalAudio.currentTime = enhancedAudio.currentTime;
-                    originalAudio.play();
-                    enhancedAudio.play();
-                    playBtn.textContent = '⏸️ Pause';
-                    isPlaying = true;
-                }} else {{
-                    originalAudio.pause();
-                    enhancedAudio.pause();
-                    playBtn.textContent = '▶️ Play';
-                    isPlaying = false;
-                }}
-            }});
+            ui.label('Projects').classes('text-lg font-semibold text-gray-700')
             
-            // Toggle button - seamless switch without stopping audio
-            toggleBtn.addEventListener('click', function() {{
-                isOriginal = !isOriginal;
-                
-                if (isOriginal) {{
-                    // Switch to Original
-                    originalAudio.volume = 1.0;
-                    enhancedAudio.volume = 0.0;
-                    toggleBtn.textContent = '🔴 Original';
-                    toggleBtn.className = 'toggle-button original';
-                }} else {{
-                    // Switch to Enhanced
-                    originalAudio.volume = 0.0;
-                    enhancedAudio.volume = 1.0;
-                    toggleBtn.textContent = '🟢 Enhanced';
-                    toggleBtn.className = 'toggle-button enhanced';
-                }}
-            }});
-            
-            // Time display update
-            originalAudio.addEventListener('timeupdate', function() {{
-                const current = formatTime(originalAudio.currentTime);
-                const duration = formatTime(originalAudio.duration);
-                timeDisplay.textContent = `${{current}} / ${{duration}}`;
-            }});
-            
-            // Auto-pause when audio ends
-            originalAudio.addEventListener('ended', function() {{
-                playBtn.textContent = '▶️ Play';
-                isPlaying = false;
-            }});
-            
-            // Keep audios in sync
-            originalAudio.addEventListener('play', function() {{
-                if (Math.abs(originalAudio.currentTime - enhancedAudio.currentTime) > 0.1) {{
-                    enhancedAudio.currentTime = originalAudio.currentTime;
-                }}
-            }});
-            
-            function formatTime(seconds) {{
-                if (isNaN(seconds)) return '0:00';
-                const mins = Math.floor(seconds / 60);
-                const secs = Math.floor(seconds % 60);
-                return `${{mins}}:${{secs.toString().padStart(2, '0')}}`;
-            }}
-        </script>
-    </body>
-    </html>
-    """
-    return html_code
+            global project_list_container
+            project_list_container = ui.column().classes('gap-2 w-full')
+            update_project_list()
 
-# CSS Injection - Modern Dark Theme (Slate Blue/Indigo)
-st.markdown("""
-    <style>
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    .stApp {
-        background-color: #0F172A;
-    }
-    
-    .block-container {
-        background-color: #0F172A;
-    }
-    
-    h1, h2, h3 {
-        color: #818CF8;
-    }
-    </style>
-""", unsafe_allow_html=True)
 
-# Sidebar - Simple Playlist Only
-with st.sidebar:
-    st.title("🎙️ Podcast Rescue")
+def update_project_list():
+    """Update the project list in sidebar"""
+    project_list_container.clear()
     
-    # File uploader
-    uploaded_file = st.file_uploader(
-        "Upload Audio File",
-        type=["mp3", "wav"],
-        help="Upload your podcast audio file (MP3 or WAV)"
-    )
-    
-    # Handle new file upload - add to history
-    if uploaded_file is not None:
-        # Check if file already exists in history
-        file_exists = False
-        for idx, file_obj in enumerate(st.session_state.file_history):
-            if file_obj['name'] == uploaded_file.name:
-                file_exists = True
-                st.session_state.active_file_index = idx
-                break
-        
-        # If new file, add to history
-        if not file_exists:
-            file_data = {
-                'name': uploaded_file.name,
-                'data': uploaded_file.getvalue(),
-                'enhanced_audio': None,
-                'waveform_original': None,
-                'waveform_enhanced': None
-            }
-            st.session_state.file_history.append(file_data)
-            st.session_state.active_file_index = len(st.session_state.file_history) - 1
-    
-    # File History / Playlist
-    if len(st.session_state.file_history) > 0:
-        st.markdown("---")
-        st.subheader("📂 Your Projects")
-        
-        file_names = [f['name'] for f in st.session_state.file_history]
-        
-        selected_file = st.radio(
-            "Select a file:",
-            options=file_names,
-            index=st.session_state.active_file_index if st.session_state.active_file_index is not None else 0,
-            label_visibility="collapsed"
-        )
-        
-        # Update active file index based on selection
-        for idx, file_obj in enumerate(st.session_state.file_history):
-            if file_obj['name'] == selected_file:
-                st.session_state.active_file_index = idx
-                break
-
-# Main Area with Tabs
-st.title("Podcast Rescue")
-
-# Get active file from session state
-active_file = None
-if st.session_state.active_file_index is not None and len(st.session_state.file_history) > 0:
-    active_file = st.session_state.file_history[st.session_state.active_file_index]
-
-# Create 3 tabs
-tab1, tab2, tab3 = st.tabs(["ℹ️ About", "🛠️ Rescue Sound", "⚖️ Dynamic Balance"])
-
-# Tab 1: About
-with tab1:
-    st.header("Welcome to Podcast Rescue")
-    st.markdown("""
-    ### 🎙️ AI-Powered Audio Enhancement
-    
-    **Podcast Rescue** is your intelligent audio engineer that transforms noisy, unbalanced podcast recordings 
-    into professional-quality audio.
-    
-    #### What We Do:
-    - **🤖 AI Noise Reduction**: Advanced machine learning algorithms identify and remove background noise, 
-      hum, hiss, and unwanted artifacts while preserving voice clarity.
-    
-    - **📊 FFmpeg Loudness Normalization**: Industry-standard audio processing ensures consistent volume 
-      levels across your entire podcast, meeting broadcast standards (LUFS normalization).
-    
-    - **🎚️ Real-Time Comparison**: Instantly compare original and enhanced audio with our seamless toggle 
-      player - no interruptions, no restarts.
-    
-    #### How It Works:
-    1. Upload your audio file (MP3 or WAV)
-    2. Adjust enhancement settings to your preference
-    3. Click "Start Rescue" to process
-    4. Compare results in real-time
-    5. Download your professional-quality audio
-    
-    #### Perfect For:
-    - Podcast creators and producers
-    - Content creators and YouTubers
-    - Remote interviews and recordings
-    - Home studio recordings
-    - Quick audio cleanup and enhancement
-    
-    ---
-    
-    **Get started by uploading an audio file from the sidebar!** 👈
-    """)
-
-# Tab 2: Rescue Sound (Main Tool)
-with tab2:
-    if active_file is not None:
-        st.caption(f"📁 {active_file['name']}")
-        
-        # Check if enhanced audio is ready
-        if active_file['enhanced_audio'] is not None:
-            # Show the seamless toggle component
-            st.subheader("🎚️ Real-Time Audio Comparison")
-            st.info("Play the audio and click the toggle button to instantly switch between Original and Enhanced versions!")
-            
-            # Generate and display custom HTML player
-            audio_html = get_audio_html(active_file['data'], active_file['enhanced_audio'])
-            components.html(audio_html, height=300)
-            
+    with project_list_container:
+        if not state['projects']:
+            ui.label('No projects yet').classes('text-gray-400 text-sm')
         else:
-            # Show original audio
-            st.subheader("🔴 Original Audio")
-            st.audio(active_file['data'], format='audio/wav')
-            
-            st.markdown("---")
-            
-            # Advanced Settings in Expander
-            with st.expander("⚙️ Advanced Settings"):
-                denoise_strength = st.slider(
-                    "Denoise Strength",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=0.5,
-                    step=0.1,
-                    help="Adjust the strength of noise reduction. Higher values remove more noise but may affect voice quality."
-                )
-                
-                st.info("💡 Tip: Start with 0.5 and adjust based on your audio quality needs.")
-            
-            # Start Rescue button
-            start_button = st.button("🚀 Start Rescue", use_container_width=True, type="primary")
-            
-            # Process audio when button is clicked
-            if start_button:
-                with st.spinner("🔧 Rescuing your podcast..."):
-                    # Simulate processing (replace with actual audio processing)
-                    import time
-                    time.sleep(1)
-                    
-                    # Store enhanced audio in session state (persists across file switches)
-                    st.session_state.file_history[st.session_state.active_file_index]['enhanced_audio'] = active_file['data']
-                    st.success("✅ Audio enhanced successfully!")
-                    st.rerun()
-    
-    else:
-        # No file selected
-        st.info("👈 Upload an audio file from the sidebar to begin")
+            for name, data in state['projects'].items():
+                with ui.card().classes('w-full p-3 cursor-pointer hover:bg-pink-50/50 transition-colors'):
+                    with ui.row().classes('items-center justify-between w-full'):
+                        with ui.column().classes('gap-1'):
+                            ui.label(name).classes('text-sm font-medium text-gray-700')
+                            status = '✅ Rescued' if data.get('rescued') else '📁 Original'
+                            ui.label(status).classes('text-xs text-gray-500')
+                        
+                        ui.button(icon='play_arrow', on_click=lambda p=data['file_path']: play_audio(p)).props('flat dense round size=sm')
 
-# Tab 3: Dynamic Balance
-with tab3:
-    st.header("Dynamic Balance & Loudness Normalization")
+
+def handle_upload(e):
+    """Handle file upload"""
+    file_name = e.name
+    file_path = os.path.join(state['upload_folder'], file_name)
     
-    if active_file is not None and active_file['enhanced_audio'] is not None:
-        st.subheader("📊 Loudness Analysis")
-        st.caption(f"📁 {active_file['name']}")
+    with open(file_path, 'wb') as f:
+        f.write(e.content.read())
+    
+    # Add to projects
+    project_name = Path(file_name).stem
+    state['projects'][project_name] = {
+        'file_path': file_path,
+        'rescued': False,
+        'original_name': file_name
+    }
+    
+    state['current_audio'] = file_path
+    update_project_list()
+    switch_page('sound_rescue')
+    ui.notify(f'Uploaded: {file_name}', type='positive')
+
+
+def play_audio(file_path):
+    """Play audio file"""
+    state['current_audio'] = file_path
+    switch_page('sound_rescue')
+
+
+def switch_page(page_name):
+    """Switch between different pages"""
+    state['current_page'] = page_name
+    main_content.clear()
+    
+    with main_content:
+        if page_name == 'sound_rescue':
+            show_sound_rescue_page()
+        elif page_name == 'about':
+            show_about_page()
+        elif page_name == 'dynamic_balance':
+            show_dynamic_balance_page()
+        elif page_name == 'create_video':
+            show_create_video_page()
+
+
+def show_sound_rescue_page():
+    """Show Sound Rescue page with waveform and controls"""
+    with ui.column().classes('gap-6 w-full max-w-5xl mx-auto'):
+        ui.label('Sound Rescue').classes('text-3xl font-bold text-gray-800')
         
-        # Placeholder for loudness analysis
-        st.info("🔧 Loudness analysis and visualization coming soon!")
+        if state['current_audio'] and os.path.exists(state['current_audio']):
+            # Waveform visualization
+            with ui.card().classes('w-full p-6 bg-white/60 backdrop-blur-lg rounded-2xl shadow-lg'):
+                ui.label('Sound Wave').classes('text-lg font-semibold text-gray-700 mb-4')
+                
+                waveform_buf = generate_waveform(state['current_audio'])
+                ui.image(waveform_buf).classes('w-full')
+            
+            # Advanced Settings
+            with ui.card().classes('w-full p-6 bg-white/60 backdrop-blur-lg rounded-2xl shadow-lg'):
+                ui.label('Advanced Settings').classes('text-lg font-semibold text-gray-700 mb-4')
+                
+                with ui.row().classes('gap-8 items-center w-full'):
+                    with ui.column().classes('flex-1'):
+                        ui.label('Low Switch').classes('text-sm text-gray-600')
+                        low_slider = ui.slider(min=0, max=1, step=0.1, value=0.5).classes('w-full')
+                        ui.label().bind_text_from(low_slider, 'value', lambda v: f'{v:.1f}').classes('text-xs text-gray-500')
+                    
+                    with ui.column().classes('flex-1'):
+                        ui.label('High Switch').classes('text-sm text-gray-600')
+                        high_slider = ui.slider(min=0, max=1, step=0.1, value=0.5).classes('w-full')
+                        ui.label().bind_text_from(high_slider, 'value', lambda v: f'{v:.1f}').classes('text-xs text-gray-500')
+                    
+                    with ui.column().classes('flex-1'):
+                        ui.label('Enhancement').classes('text-sm text-gray-600')
+                        enhancement = ui.select(['normal', 'enhanced'], value='normal').classes('w-full')
+                
+                ui.button('RESCUE', on_click=lambda: perform_rescue(low_slider.value, high_slider.value, enhancement.value)).classes('mt-4 bg-pink-500 text-white px-8 py-2 rounded-lg hover:bg-pink-600')
+            
+            # Audio Player
+            with ui.card().classes('w-full p-6 bg-white/60 backdrop-blur-lg rounded-2xl shadow-lg'):
+                ui.label('Audio Player').classes('text-lg font-semibold text-gray-700 mb-4')
+                ui.audio(state['current_audio']).classes('w-full')
         
-        st.markdown("""
-        ### Features (Coming Soon):
-        - **LUFS Measurement**: Integrated loudness measurement
-        - **Peak Normalization**: Prevent clipping and distortion
-        - **Dynamic Range Visualization**: See your audio's dynamic profile
-        - **Broadcast Standards**: Meet podcast platform requirements
-        - **Batch Processing**: Normalize multiple files at once
-        """)
+        else:
+            with ui.card().classes('w-full p-12 bg-white/60 backdrop-blur-lg rounded-2xl shadow-lg text-center'):
+                ui.label('📁 No audio file selected').classes('text-xl text-gray-400')
+                ui.label('Upload a file from the sidebar to get started').classes('text-sm text-gray-500 mt-2')
+
+
+def perform_rescue(low, high, enhancement):
+    """Perform audio rescue operation"""
+    if not state['current_audio']:
+        ui.notify('No audio file selected', type='warning')
+        return
+    
+    try:
+        # Generate output filename
+        original_name = Path(state['current_audio']).stem
+        output_path = os.path.join(state['output_folder'], f'{original_name}_rescued.mp3')
         
-    else:
-        st.info("📌 Dedicated Loudness Normalization Tool (Coming Soon)")
-        st.markdown("""
-        This tab will provide advanced loudness normalization features using FFmpeg:
+        # Process audio
+        rescue_audio(state['current_audio'], output_path, low, high, enhancement)
         
-        - Analyze audio loudness levels (LUFS)
-        - Normalize to broadcast standards (-16 LUFS for podcasts)
-        - Visualize dynamic range and peaks
-        - Apply compression and limiting
-        - Ensure consistent volume across episodes
+        # Update project state
+        rescued_name = f'{original_name}_rescued'
+        state['projects'][rescued_name] = {
+            'file_path': output_path,
+            'rescued': True,
+            'original_name': f'{original_name}_rescued.mp3'
+        }
         
-        **Upload and process a file in the "Rescue Sound" tab to see analysis here.**
-        """)
+        # Mark original as rescued
+        for name, data in state['projects'].items():
+            if data['file_path'] == state['current_audio']:
+                data['rescued'] = True
+        
+        state['current_audio'] = output_path
+        update_project_list()
+        switch_page('sound_rescue')
+        
+        ui.notify('✅ Audio rescued successfully!', type='positive')
+    
+    except Exception as e:
+        ui.notify(f'Error: {str(e)}', type='negative')
+
+
+def show_about_page():
+    """Show About page"""
+    with ui.column().classes('gap-6 w-full max-w-3xl mx-auto'):
+        with ui.card().classes('w-full p-8 bg-white/60 backdrop-blur-lg rounded-2xl shadow-lg'):
+            ui.label('About Podcast Rescue').classes('text-3xl font-bold text-gray-800 mb-4')
+            ui.label('Rescue your podcast audio with advanced processing tools.').classes('text-lg text-gray-600 mb-4')
+            ui.label('Features:').classes('text-xl font-semibold text-gray-700 mt-6 mb-2')
+            ui.label('• Audio normalization and compression').classes('text-gray-600')
+            ui.label('• Waveform visualization').classes('text-gray-600')
+            ui.label('• Advanced audio enhancement').classes('text-gray-600')
+            ui.label('• Project management').classes('text-gray-600')
+
+
+def show_dynamic_balance_page():
+    """Show Dynamic Balance page"""
+    with ui.column().classes('gap-6 w-full max-w-3xl mx-auto'):
+        with ui.card().classes('w-full p-8 bg-white/60 backdrop-blur-lg rounded-2xl shadow-lg text-center'):
+            ui.label('Dynamic Balance').classes('text-3xl font-bold text-gray-800 mb-4')
+            ui.label('Coming soon...').classes('text-lg text-gray-400')
+
+
+def show_create_video_page():
+    """Show Create Video page"""
+    with ui.column().classes('gap-6 w-full max-w-3xl mx-auto'):
+        with ui.card().classes('w-full p-8 bg-white/60 backdrop-blur-lg rounded-2xl shadow-lg text-center'):
+            ui.label('Create Video').classes('text-3xl font-bold text-gray-800 mb-4')
+            ui.label('Coming soon...').classes('text-lg text-gray-400')
+
+
+# Main App
+@ui.page('/')
+def main():
+    # Set background gradient
+    ui.query('body').style('''
+        background: linear-gradient(135deg, #fce7f3 0%, #ddd6fe 50%, #e0f2fe 100%);
+        background-attachment: fixed;
+    ''')
+    
+    # Create navbar
+    create_navbar()
+    
+    # Create sidebar
+    create_sidebar()
+    
+    # Main content area
+    global main_content
+    with ui.column().classes('mt-20 p-8 w-full') as main_content:
+        show_sound_rescue_page()
+
+
+# Run the app
+ui.run(title='Podcast Rescue', port=8080, reload=False)
