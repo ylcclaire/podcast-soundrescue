@@ -15,7 +15,8 @@ if sys.stdout.encoding != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # --- 🔴 配置区 ---
-os.environ["REPLICATE_API_TOKEN"] = "r8_RoOgQCw7zJqO137NJNirAhsjYLl514Q12PpTB"
+# 从环境变量读取 API Token，如果没有则使用默认值（本地开发用）
+os.environ["REPLICATE_API_TOKEN"] = os.getenv("REPLICATE_API_TOKEN", "your_token_here")
 
 state = {
     'original_audio': None,      
